@@ -1,4 +1,5 @@
 import logging
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -122,13 +123,13 @@ def price_page():
 
 def power_page():
     st.header('出力／联络线96转24')
-    st.caption('支持新能源、非市场化机组出力、省间联络线横向96点表。结果竖排，Excel无底色、黑色文字。')
+    st.caption('支持新能源、非市场化机组出力、省间联络线横向96点表，也支持结构明确的无表头文件。结果竖排，Excel无底色、黑色文字。')
     method = 'mean'
     st.info('每小时值 = 对应4个15分钟值之和 ÷ 4。固定取算术平均，适用于小时平均功率／出力；单位沿用原表。')
     st.caption('不根据文件名猜测功率或电量。负数、零值保留；空白、重复或缺失时段会停止该文件的计算。')
     uploads = st.file_uploader('上传出力／联络线Excel（可多选）', type=['xlsx'], accept_multiple_files=True, key='power_upload')
     if not uploads:
-        st.info('支持“出力类型＋日期＋00:15至24:00”或“日期＋名称／标识＋1至96”格式。')
+        st.info('支持带时段表头的横向96点表；无表头文件会先显示识别范围，确认时间顺序后再转换。')
         return
     records = []
     for upload in uploads:
@@ -144,6 +145,17 @@ def power_page():
     selected = st.selectbox('选择文件、日期及单元', range(len(records)),
                             format_func=lambda i: f'{records[i][0]} · {records[i][1].label}', key='power_record')
     filename, group = records[selected]
+    if group.inferred:
+        st.warning('此文件没有时段表头。日期、名称与96点范围按内容识别，不固定列号；请核对名称、范围和原始时间顺序。')
+        preview = [{'名称': name, '日期': group.date,
+                    '数值范围': f'{group.cells[name][0]}—{group.cells[name][-1]}',
+                    '前4点': ' / '.join(str(v) for v in points[:4]),
+                    '后4点': ' / '.join(str(v) for v in points[-4:])}
+                   for name, points in group.curves.items()]
+        st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
+        fingerprint = hashlib.sha256(repr((filename, group.date, group.identifier, group.sheet, group.curves, group.cells)).encode()).hexdigest()
+        if not st.checkbox('我确认：以上96点从左到右依次对应00:15至24:00，每点15分钟', key='power_confirm_'+fingerprint):
+            return
     values = group.hours(method)
     data = pd.DataFrame({'时段（结束时刻）': [clock((h+1)*60) for h in range(24)], '日期': [group.date]*24,
                          **{name: [float(v) for v in points] for name, points in values.items()}})

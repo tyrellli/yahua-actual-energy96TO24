@@ -22,6 +22,7 @@ class PowerGroup:
     sheet: str
     curves: dict
     cells: dict
+    inferred: bool = False
 
     @property
     def label(self):
@@ -50,6 +51,52 @@ def _period(value):
     return None
 
 
+def _infer_fields(row):
+    """按内容定位唯一连续96数值区间，不固定列号，允许额外元数据及备注。"""
+    runs, start = [], None
+    for i in range(len(row)+1):
+        numeric = False
+        if i < len(row):
+            try:
+                price_number(row[i], '无表头数据')
+                numeric = True
+            except PriceError:
+                pass
+        if numeric and start is None:
+            start = i
+        if not numeric and start is not None:
+            runs.append((start, i))
+            start = None
+    candidates = [(a,b) for a,b in runs if b-a == 96]
+    # 长于96点的数值段无法分清编号、合计和真实时段，不截取其中一段。
+    if len(candidates) != 1 or any(b-a > 96 for a,b in runs):
+        return None
+    start, end = candidates[0]
+    metadata = [i for i in range(len(row)) if not start <= i < end]
+    dates = []
+    for i in metadata:
+        try:
+            price_date(row[i], '无表头日期')
+            dates.append(i)
+        except PriceError:
+            pass
+    if len(dates) != 1:
+        return None
+    names = []
+    for i in range(start):
+        value = row[i]
+        if i in dates or value is None or not str(value).strip():
+            continue
+        try:
+            price_number(value, '元数据')
+        except PriceError:
+            names.append(i)
+    # 数据区前最近的文字列作为候选名称，网页展示后由用户核对。
+    name = names[-1] if names else None
+    identifiers = [i for i in range(start) if i not in dates and i != name]
+    return dates[0], name, identifiers, {p: start+p-1 for p in range(1, 97)}
+
+
 def extract_power(contents, filename=''):
     try:
         book = load_workbook(BytesIO(contents), read_only=True, data_only=True)
@@ -61,38 +108,56 @@ def extract_power(contents, filename=''):
             sheet.reset_dimensions()
             iterator = sheet.iter_rows(values_only=True)
             fields = None
+            inferred = False
             for row_index, row in enumerate(iterator, 1):
                 if fields is None:
                     if row_index > 100:
                         break
                     labels = [str(v or '').strip() for v in row]
                     if '日期' not in labels:
+                        fields = _infer_fields(row)
+                        if fields is None:
+                            numeric_count = 0
+                            for value in row:
+                                try:
+                                    price_number(value, '待识别行')
+                                    numeric_count += 1
+                                except PriceError:
+                                    pass
+                            if numeric_count >= 90:
+                                raise PowerError(f'{sheet.title}第{row_index}行：疑似无表头数据，但日期／名称／96点范围无法唯一识别，请核对。')
+                            continue
+                        inferred = True
+                    else:
+                        dates = [i for i, value in enumerate(labels) if value == '日期']
+                        names = [i for i, value in enumerate(labels) if value in ('名称', '出力类型')]
+                        periods = {}
+                        for i, value in enumerate(row):
+                            period = _period(value)
+                            if period is not None:
+                                if period in periods:
+                                    raise PowerError(f'{sheet.title}：重复时段{period}。')
+                                periods[period] = i
+                        if not periods:
+                            raise PowerError(f'{sheet.title}：有日期表头但无有效96点时段表头，请核对。')
+                        missing = set(range(1, 97))-set(periods)
+                        if missing:
+                            raise PowerError(f'{sheet.title}：缺少时段' + '、'.join(map(str, sorted(missing))))
+                        if len(dates) != 1 or len(names) > 1:
+                            raise PowerError(f'{sheet.title}：日期／名称表头不唯一。')
+                        if any(i >= min(periods.values()) for i in dates+names):
+                            raise PowerError('日期和名称必须位于96点数据之前。')
+                        identifiers = [i for i in range(min(periods.values())) if i not in dates+names]
+                        fields = (dates[0], names[0] if names else None, identifiers, periods)
                         continue
-                    dates = [i for i, value in enumerate(labels) if value == '日期']
-                    names = [i for i, value in enumerate(labels) if value in ('名称', '出力类型')]
-                    periods = {}
-                    for i, value in enumerate(row):
-                        period = _period(value)
-                        if period is not None:
-                            if period in periods:
-                                raise PowerError(f'{sheet.title}：重复时段{period}。')
-                            periods[period] = i
-                    if not periods:
-                        continue
-                    missing = set(range(1, 97))-set(periods)
-                    if missing:
-                        raise PowerError(f'{sheet.title}：缺少时段' + '、'.join(map(str, sorted(missing))))
-                    if len(dates) != 1 or len(names) > 1:
-                        raise PowerError(f'{sheet.title}：日期／名称表头不唯一。')
-                    if any(i >= min(periods.values()) for i in dates+names):
-                        raise PowerError('日期和名称必须位于96点数据之前。')
-                    identifiers = [i for i in range(min(periods.values())) if i not in dates+names]
-                    fields = (dates[0], names[0] if names else None, identifiers, periods)
-                    continue
                 if not any(v is not None and str(v).strip() for v in row):
                     continue
                 date_col, name_col, identifiers, periods = fields
                 val = lambda i: row[i] if i < len(row) else None
+                if inferred:
+                    check = _infer_fields(row)
+                    if check != fields:
+                        raise PowerError(f'{sheet.title}第{row_index}行：无表头结构不一致或不是完整96点，请核对。')
                 day = price_date(val(date_col), f'{sheet.title}第{row_index}行')
                 identifier = ' / '.join(str(val(i)) for i in identifiers if val(i) is not None and str(val(i)).strip())
                 if name_col is not None:
@@ -102,7 +167,7 @@ def extract_power(contents, filename=''):
                 else:
                     name = '省间联络线' if '联络线' in filename else '未命名曲线'
                 key = (day, identifier, sheet.title)
-                group = groups.setdefault(key, PowerGroup(day, identifier, sheet.title, {}, {}))
+                group = groups.setdefault(key, PowerGroup(day, identifier, sheet.title, {}, {}, inferred))
                 if name in group.curves:
                     raise PowerError(f'{day}／{identifier}：重复曲线“{name}”，请核对后上传。')
                 points = tuple(price_number(val(periods[p]), f'{sheet.title}!{get_column_letter(periods[p]+1)}{row_index}')
@@ -110,7 +175,7 @@ def extract_power(contents, filename=''):
                 group.curves[name] = points
                 group.cells[name] = tuple(f'{get_column_letter(periods[p]+1)}{row_index}' for p in range(1, 97))
         if not groups:
-            raise PowerError('未识别到横向96点数据。需要“日期”及1—96或00:15—24:00表头。')
+            raise PowerError('未识别到完整横向96点数据。无表头时需要明确日期和唯一连续96个有效数值；连续数值超过96个时不自动截取。')
         return list(groups.values())
     except PriceError as exc:
         raise PowerError(str(exc)) from exc
@@ -142,5 +207,7 @@ def export_power(group, filename, method='mean'):
         sheet.write_row(row+1, 0, ['单位与方向', '沿用原表；未注明单位时不猜测；正负号原样保留。'])
         sheet.write_row(row+2, 0, ['来源文件', filename])
         sheet.write_row(row+3, 0, ['工作表／标识', f'{group.sheet} / {group.identifier}'])
+        if group.inferred:
+            sheet.write_row(row+4, 0, ['无表头说明', '按原列序作为00:15至24:00；转换前由用户确认时间顺序。'])
     book.close()
     return out.getvalue()

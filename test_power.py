@@ -25,6 +25,81 @@ def sample(named=True, clocks=False, change=None, reverse=False):
 
 
 class PowerTests(unittest.TestCase):
+    def test_headerless_columns_shift_extra_metadata_and_trailing_notes(self):
+        def reshape(s):
+            s.delete_rows(1)
+            s.insert_cols(1, 4)
+            s['A1'] = '区域说明'
+            s['A2'] = '区域说明'
+            s['B1'] = 1010013
+            s['B2'] = 1010013
+            s['C1'] = 2026
+            s['C2'] = 2026
+            s.cell(1, 103, '原始备注')
+            s.cell(2, 103, '原始备注')
+        group, = extract_power(sample(change=reshape))
+        self.assertTrue(group.inferred)
+        self.assertEqual(group.date, '2026-10-15')
+        self.assertEqual(group.cells['风电总出力'][0], 'G1')
+        self.assertEqual(group.cells['风电总出力'][-1], 'CX1')
+        self.assertEqual(group.hours()['风电总出力'][0], Decimal('-47.5'))
+
+    def test_two_numeric_blocks_are_not_guessed(self):
+        def two_blocks(s):
+            s.delete_rows(1)
+            for r in (1, 2):
+                s.cell(r, 99, '第二段')
+                for c in range(100, 196):
+                    s.cell(r, c, c)
+        with self.assertRaises(PowerError):
+            extract_power(sample(change=two_blocks))
+
+    def test_headerless_detection_and_no_97_point_guess(self):
+        def remove_header(s):
+            s.delete_rows(1)
+            s.insert_rows(1)
+        group, = extract_power(sample(change=remove_header))
+        self.assertTrue(group.inferred)
+        self.assertEqual(group.cells['风电总出力'][0], 'C2')
+        self.assertEqual(group.hours()['风电总出力'][0], Decimal('-47.5'))
+        def bad_date(s):
+            s.delete_rows(1)
+            s['A1'] = '无日期'
+        with self.assertRaises(PowerError):
+            extract_power(sample(change=bad_date))
+        def extra(s):
+            s.delete_rows(1)
+            s.cell(1, 99, 97)
+        with self.assertRaises(PowerError):
+            extract_power(sample(change=extra))
+        def missing(s):
+            s.delete_rows(1)
+            s['E2'] = None
+        with self.assertRaises(PowerError):
+            extract_power(sample(change=missing))
+
+    def test_headerless_requires_user_confirmation_in_ui(self):
+        from streamlit.testing.v1 import AppTest
+        def remove(s):
+            s.delete_rows(1)
+        upload = BytesIO(sample(change=remove)); upload.name = '无表头.xlsx'
+        app = AppTest.from_file('app.py').run()
+        with patch('streamlit.file_uploader', return_value=[upload]), patch('streamlit.selectbox', return_value=0):
+            app.sidebar.radio[0].set_value('出力／联络线').run(timeout=30)
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(len(app.success), 0)
+            self.assertEqual(len(app.checkbox), 1)
+            app.checkbox[0].check().run(timeout=30)
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(len(app.success), 1)
+            self.assertEqual(app.dataframe[1].value.iloc[0,2], -47.5)
+            changed = BytesIO(sample(change=lambda s:(s.delete_rows(1), setattr(s['C1'], 'value', 999))))
+            changed.name = '无表头.xlsx'
+            with patch('streamlit.file_uploader', return_value=[changed]):
+                app.run(timeout=30)
+                self.assertFalse(app.checkbox[0].value)
+                self.assertEqual(len(app.success), 0)
+
     def test_formats_order_and_both_methods(self):
         for clocks in (False, True):
             group, = extract_power(sample(clocks=clocks, reverse=True))
