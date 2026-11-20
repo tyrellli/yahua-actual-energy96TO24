@@ -10,7 +10,7 @@ from power import PowerError, extract_power, export_power
 st.set_page_config(page_title='亚华 · 电量与电价96转24',page_icon='⚡',layout='wide')
 st.title('亚华 · 96时段转24时段')
 mode = st.sidebar.radio('选择转换功能',['实际上网电量','电价（日前／实时）','出力／联络线'])
-st.sidebar.caption('电量：每4点求和\n\n电价：每4点取平均\n\n出力／联络线：默认取平均，可切换求和')
+st.sidebar.caption('电量：每4点求和\n\n电价：每4点取平均\n\n出力／联络线：每4点取平均')
 
 
 def energy_page():
@@ -123,10 +123,8 @@ def price_page():
 def power_page():
     st.header('出力／联络线96转24')
     st.caption('支持新能源、非市场化机组出力、省间联络线横向96点表。结果竖排，Excel无底色、黑色文字。')
-    choice = st.radio('选择计算口径', ['取算术平均（功率／出力）', '求和（15分钟电量）'], horizontal=True, key='power_method')
-    method = 'mean' if choice.startswith('取') else 'sum'
-    st.info('每小时值 = 对应4个15分钟值之和 ÷ 4。适用于小时平均功率／出力；单位沿用原表。'
-            if method == 'mean' else '每小时值 = 对应4个15分钟电量之和。请确认原表是分时电量，而非功率。')
+    method = 'mean'
+    st.info('每小时值 = 对应4个15分钟值之和 ÷ 4。固定取算术平均，适用于小时平均功率／出力；单位沿用原表。')
     st.caption('不根据文件名猜测功率或电量。负数、零值保留；空白、重复或缺失时段会停止该文件的计算。')
     uploads = st.file_uploader('上传出力／联络线Excel（可多选）', type=['xlsx'], accept_multiple_files=True, key='power_upload')
     if not uploads:

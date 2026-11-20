@@ -66,7 +66,7 @@ class PowerTests(unittest.TestCase):
                         self.assertIn(cell.fill.patternType, (None, 'none'))
             book.close()
 
-    def test_streamlit_power_page_and_switch(self):
+    def test_streamlit_power_page_uses_average_only(self):
         from streamlit.testing.v1 import AppTest
         upload = BytesIO(sample()); upload.name = '虚构出力.xlsx'
         app = AppTest.from_file('app.py').run()
@@ -75,9 +75,8 @@ class PowerTests(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(len(app.error), 0)
             self.assertEqual(app.dataframe[0].value.iloc[0,2], -47.5)
-            app.radio[0].set_value('求和（15分钟电量）').run(timeout=30)
-            self.assertEqual(len(app.exception), 0)
-            self.assertEqual(app.dataframe[0].value.iloc[0,2], -190)
+            self.assertFalse(any('求和（15分钟电量）' in radio.options for radio in app.radio))
+            self.assertIn('固定取算术平均', app.info[0].value)
 
 
 if __name__ == '__main__':
