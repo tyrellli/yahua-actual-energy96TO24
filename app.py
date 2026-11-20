@@ -4,12 +4,13 @@ import pandas as pd
 import streamlit as st
 from energy import BillError, clock, export, extract
 from price import PriceError, export_prices, extract_prices
+from power import PowerError, extract_power, export_power
 
 
 st.set_page_config(page_title='亚华 · 电量与电价96转24',page_icon='⚡',layout='wide')
 st.title('亚华 · 96时段转24时段')
-mode = st.sidebar.radio('选择转换功能',['实际上网电量','电价（日前／实时）'])
-st.sidebar.caption('电量：每4点求和\n\n电价：每4点取平均')
+mode = st.sidebar.radio('选择转换功能',['实际上网电量','电价（日前／实时）','出力／联络线'])
+st.sidebar.caption('电量：每4点求和\n\n电价：每4点取平均\n\n出力／联络线：默认取平均，可切换求和')
 
 
 def energy_page():
@@ -119,7 +120,61 @@ def price_page():
                      hide_index=True,use_container_width=True)
 
 
+def power_page():
+    st.header('出力／联络线96转24')
+    st.caption('支持新能源、非市场化机组出力、省间联络线横向96点表。结果竖排，Excel无底色、黑色文字。')
+    choice = st.radio('选择计算口径', ['取算术平均（功率／出力）', '求和（15分钟电量）'], horizontal=True, key='power_method')
+    method = 'mean' if choice.startswith('取') else 'sum'
+    st.info('每小时值 = 对应4个15分钟值之和 ÷ 4。适用于小时平均功率／出力；单位沿用原表。'
+            if method == 'mean' else '每小时值 = 对应4个15分钟电量之和。请确认原表是分时电量，而非功率。')
+    st.caption('不根据文件名猜测功率或电量。负数、零值保留；空白、重复或缺失时段会停止该文件的计算。')
+    uploads = st.file_uploader('上传出力／联络线Excel（可多选）', type=['xlsx'], accept_multiple_files=True, key='power_upload')
+    if not uploads:
+        st.info('支持“出力类型＋日期＋00:15至24:00”或“日期＋名称／标识＋1至96”格式。')
+        return
+    records = []
+    for upload in uploads:
+        try:
+            records.extend((upload.name, group) for group in extract_power(upload.getvalue(), upload.name))
+        except PowerError as exc:
+            st.error(f'{upload.name}：{exc}')
+        except Exception:
+            logging.exception('出力／联络线读取失败')
+            st.error(f'{upload.name}：读取失败，请核对原文件。')
+    if not records:
+        return
+    selected = st.selectbox('选择文件、日期及单元', range(len(records)),
+                            format_func=lambda i: f'{records[i][0]} · {records[i][1].label}', key='power_record')
+    filename, group = records[selected]
+    values = group.hours(method)
+    data = pd.DataFrame({'时段（结束时刻）': [clock((h+1)*60) for h in range(24)], '日期': [group.date]*24,
+                         **{name: [float(v) for v in points] for name, points in values.items()}})
+    st.success(f'96点完整，共{len(values)}条曲线，已生成24时段竖版结果。')
+    st.caption('01:00代表00:00—01:00；24:00代表23:00—24:00。显示3位小数，计算保留原始精度。')
+    st.dataframe(data.style.format({name: '{:.3f}' for name in values}), hide_index=True, use_container_width=True)
+    try:
+        excel = export_power(group, filename, method)
+    except Exception:
+        logging.exception('出力／联络线导出失败')
+        st.error('Excel导出失败，请保留原文件用于排查。')
+        return
+    suffix = '平均' if method == 'mean' else '求和'
+    stem = filename.rsplit('.', 1)[0]
+    st.download_button('下载24时段竖版Excel（无底色）', excel,
+                       file_name=f'{stem}_{group.date}_24时段_{suffix}_竖版_无底色.xlsx',
+                       mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', type='primary')
+    with st.expander('复制到Excel（选中下方文本后复制）'):
+        st.text_area('制表符分隔文本', data.to_csv(index=False, sep='\t', float_format='%.3f'), height=260, key='power_copy')
+    with st.expander('原始96点及来源'):
+        st.write(f'工作表：{group.sheet}；单元标识：{group.identifier or "原表未标"}')
+        st.dataframe(pd.DataFrame({'结束时刻': [clock((p+1)*15) for p in range(96)],
+                                   **{name: [float(v) for v in points] for name, points in group.curves.items()}}),
+                     hide_index=True, use_container_width=True)
+
+
 if mode=='实际上网电量':
     energy_page()
-else:
+elif mode=='电价（日前／实时）':
     price_page()
+else:
+    power_page()
